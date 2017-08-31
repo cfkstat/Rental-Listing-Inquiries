@@ -1,0 +1,280 @@
+---
+title: "Rental Listing Inquiries"
+output: html_document
+---
+
+# data import
+```{r data import}
+## data import
+packages <- c("jsonlite", "dplyr", "purrr", "tidytext", "ggplot2", "ggthemes",
+              "RecordLinkage","sampling", "xgboost", "RCurl", "ROCR")
+purrr::walk(packages, library, character.only = TRUE, warn.conflicts = FALSE)
+# "rattle",
+read.fromJson <- function(filepath){
+  data <- fromJSON(filepath)
+  var <- setdiff(names(data), c("photos","features"))
+  data <- map_at(data, var, unlist) %>%
+    tibble::as_tibble(.) %>%
+    mutate(feature_count = lengths(features)) %>%
+    mutate(photo_count = lengths(photos)) %>%
+    select(-features, -photos) %>%
+    data.frame
+}
+
+rental_data <- read.fromJson("train.json")
+
+## data exploration
+glimpse(rental_data)
+```
+
+From information of rental, we use use the counter of photos and features, to replace them.
+
+# data explore
+```{r data explore}
+theme_set(theme_economist())
+plot.theme <- theme(
+  legend.position = "bottom",
+  axis.text.x=element_text(size=12),
+  axis.text.y=element_text(size=12),
+  axis.title.x=element_text(size=14),
+  axis.title.y=element_text(size=14),
+  axis.title = element_text(size=16, vjust=3),
+  plot.title = element_text(hjust = 0.5)
+)
+rental_data %>%
+  group_by(interest_level) %>%
+  count() %>%
+  arrange(desc(n)) %>%
+  ggplot(aes(x=interest_level, y=n, fill=interest_level)) +
+  geom_bar(stat="identity") +
+  labs(x = "interest level", y = "Freq", title = "The distribution of interse level") +
+  geom_text(aes(label = n, vjust=-0.2)) +
+  plot.theme
+
+
+rental_data %>%
+  group_by(interest_level, bathrooms) %>%
+  count() %>%
+  arrange(desc(bathrooms)) %>%
+  ggplot(aes(x=as.character(bathrooms), y=n, fill=bathrooms)) +
+  geom_bar(stat="identity") +
+  facet_wrap(~interest_level) +
+  coord_flip() +
+  labs(x = "bath room count", y = "Freq", title = "The distribution of bath rooms number by interest level") +
+  geom_text(aes(label = n, hjust=-0.2)) +
+  plot.theme
+
+rental_data %>%
+  group_by(interest_level, feature_count) %>%
+  count() %>%
+  arrange(desc(feature_count)) %>%
+  ggplot(aes(x=as.factor(feature_count), y=n, fill=feature_count)) +
+  geom_bar(stat="identity") +
+  facet_wrap(~interest_level) +
+  coord_flip() +
+  labs(x = "feature count", y = "Freq", title = "fatures count interset level") +
+  geom_text(aes(label = n, hjust=0.5)) +
+  theme(legend.position = "bottom")  +
+  plot.theme
+
+
+rental_data %>%
+  group_by(interest_level, photo_count) %>%
+  count() %>%
+  arrange(desc(photo_count)) %>%
+  ggplot(aes(x=as.factor(photo_count), y=n, fill=photo_count)) +
+  geom_bar(stat="identity") +
+  facet_wrap(~interest_level) +
+  coord_flip() +
+  labs(x = "photo count", y = "Freq", title = "photos count by interset level") +
+  geom_text(aes(label = n, hjust=-0.2)) +
+  plot.theme
+```
+
+
+# outlier detection
+```{r outlier detection}
+detect_outlier <- function(column) {
+  iqr = quantile(column, .75) - quantile(column, .25)
+  low = quantile(column, .25) - 1.5 * iqr
+  high = quantile(column, .75) + 1.5 * iqr
+  outlier_index = ifelse(column < low | column > high, TRUE, FALSE)
+  results <- list("index" = outlier_index, "values"  = column[outlier_index], 'low' = low, 'high' = high, 'iqr' = iqr)
+  return(results)
+}
+
+rental_data %>%
+  ggplot(aes(x=interest_level, y=price)) +
+  geom_violin((aes(fill = interest_level))) +
+  geom_boxplot(width=.1, fill="black", outlier.color="red") +
+    stat_summary(fun.y=median, geom="point",
+                 fill="blue", shape=21, size=2.5) +
+  ylim(0, quantile(rental_data$price, .99)) +
+  plot.theme
+
+
+rental_data %>%
+  ggplot(aes(x=interest_level, y=longitude)) +
+  geom_violin((aes(fill = interest_level))) +
+  geom_boxplot(width=.1, fill="black", outlier.color="red") +
+  stat_summary(fun.y=median, geom="point",
+               fill="blue", shape=21, size=2.5) +
+  ylim(0, quantile(rental_data$longitude, .99)) +
+  plot.theme
+
+rental_data %>%
+  ggplot(aes(x=interest_level, y=latitude)) +
+  geom_violin((aes(fill = interest_level))) +
+  geom_boxplot(width=.1, fill="black", outlier.color="red") +
+  stat_summary(fun.y=median, geom="point",
+               fill="blue", shape=21, size=2.5) +
+  ylim(0, quantile(rental_data$latitude, .99)) +
+  plot.theme
+
+
+# From the numer plot, we should deal with the outlier observations.
+
+rental_data <- rental_data %>%
+  filter(!detect_outlier(price)$index) %>%
+  filter(!detect_outlier(latitude)$index) %>%
+  filter(!detect_outlier(longitude)$index)
+
+
+rental_data %>%
+  ggplot(aes(x=price, y=..density..)) +
+  geom_histogram(fill="cornsilk", colour="red", size=.2,
+                 binwidth = diff(range(rental_data$price))/20) +
+  geom_density() +
+  facet_grid(.~interest_level) +
+  labs(title = "The distribution of price by interset level") +
+  plot.theme
+
+rental_data %>%
+  ggplot(aes(x=latitude, y=..density..)) +
+  geom_histogram(fill="cornsilk", colour="red", size=.2,
+                 binwidth = diff(range(rental_data$latitude))/20) +
+  geom_density() +
+  facet_grid(.~interest_level) +
+  labs(title = "The distribution of latitude by interset level") +
+  plot.theme
+
+rental_data %>%
+  ggplot(aes(x=longitude, y=..density..)) +
+  geom_histogram(fill="cornsilk", colour="red", size=.2,
+                 binwidth = diff(range(rental_data$longitude))/20) +
+  geom_density() +
+  facet_grid(.~interest_level) +
+  labs(title = "The distribution of latitude by interset level") +
+  plot.theme
+```
+
+
+From the boxplot and violin above, there are some outlier points in observations, therefore, we use the the Interquartile Range Rule to exclude them.
+
+# var transform
+```{r var transform}
+# Variable Transform
+
+##1. Creating Features from Street Address and Display Address
+rental_data <- rental_data %>%
+  mutate(distance = levenshteinSim(tolower(street_address),tolower(display_address))) %>%
+  select(bathrooms, bedrooms,latitude, longitude, price, interest_level, feature_count, photo_count, distance) %>%
+  mutate(distance = ifelse(is.na(distance), 0, distance))
+
+
+na.omit(rental_data) %>%
+  ggplot(aes(x=distance, y=..density..)) +
+  geom_histogram(fill="cornsilk", colour="red", size=.2) +
+  geom_density() +
+  facet_grid(.~interest_level) +
+  labs(title = "The distribution of distance by interset level") +
+  plot.theme
+```
+
+- The Levenshtein distance is a string metric for measuring the difference between two sequences.  therefore, we create a new feature the similarity between the street address and the display address using the Levenshtein distance.
+
+# data partition
+
+```{r data partition}
+sample.flag <- strata(rental_data, stratanames = "interest_level",
+                      size = 3*rep(min(table(rental_data$interest_level)),3),
+                      method = "srswr")
+
+
+## data partition
+rental_data <- na.omit(rental_data)
+train.data <- na.omit(rental_data[sample.flag$ID_unit,]) %>%
+  mutate(interest_level = factor(interest_level)) %>%
+  sample_frac(1)
+test.data <- na.omit(rental_data[-sample.flag$ID_unit,]) %>%
+  mutate(interest_level = factor(interest_level)) %>%
+  sample_frac(1)
+
+
+train_matrix <- Matrix::sparse.model.matrix(interest_level ~ .-1, data = train.data)
+
+test_matrix <- Matrix::sparse.model.matrix(interest_level ~ .-1, data = test.data)
+
+dtrain <- xgb.DMatrix(train_matrix,
+                      label = as.integer(as.factor(train.data$interest_level))-1)
+dtest <- xgb.DMatrix(test_matrix, label = as.integer(as.factor(test.data$interest_level))-1)
+label.train <- train.data$interest_level
+label.test <- test.data$interest_level
+```
+
+The distribution of interest_level is some incline, high score is only 7.4% percent. Therefore, we use resample to get the train data with the stratified sampling replacement, change the distribution of high in interest_level.
+	
+# xgboost
+## xgboost treee model
+```{r xgboost treee model}
+
+param <- list(objective = "multi:softprob",
+              booster="gbtree", eval_metric = "merror",
+              max.depth = 100,eta = 0.1, nthread =8,
+              alpha=0.01)
+
+watchlist <- list(eval = dtest, train = dtrain)
+
+system.time(
+  fit.xgboost.tree <- xgb.train(
+    nrounds = 100,
+    verbose = 1,
+    params = param,
+    num_class = 3,
+    dtrain,
+    watchlist)
+)
+
+```
+
+
+xgboost tree model
+
+## model prediction
+```{r model prediction}
+predict_data <- read.fromJson("test.json") %>%
+    mutate(distance = levenshteinSim(tolower(street_address),tolower(display_address))) %>%
+  mutate(distance = ifelse(is.na(distance), 0, distance)) %>%
+  select(bathrooms, bedrooms,latitude, longitude, price, feature_count, photo_count, distance) %>%
+  mutate(interest_level = " ")
+predict.matrix <- Matrix::sparse.model.matrix(interest_level ~ .-1, data = predict_data)
+
+tree.predict <- predict(fit.xgboost.tree, predict.matrix)
+
+Y.tag = 1:length(tree.predict) %%3 + 1
+high <- tree.predict[Y.tag==2]
+low <- tree.predict[Y.tag==3]
+medium <- tree.predict[Y.tag==1]
+listing_id <- read.fromJson("test.json")$listing_id
+tree.predict.df <- data.frame(listing_id, high, low, medium)
+# tree.predict.df$interest_level <- factor(apply(tree.predict.df, 1,                                      function(x) which.max(x) - 1))
+# 
+# levels(tree.predict.df$interest_level) <- c("high", "low", "medium")
+# tree.predict.df$interest_level <- as.character(tree.predict.df$interest_level)
+
+write.csv(tree.predict.df, "predict_df.csv",row.names = FALSE)
+
+tree.predict.df %>%
+  sample_n(20) %>%
+  knitr::kable(caption = "The 20 sample of predict of xgboost linear model")
+```
